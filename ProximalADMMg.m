@@ -1,15 +1,13 @@
-function [x1,y1,Tcpu,history] = nqL1rpvHwl(A,b,gamma,w,opts)
+function [x1,y1,times,history] = ProximalADMMg(A,b,gamma,w,opts)
 
 % the constrained piecewise quadratic approximation model
 %
 % min 0.5*||Ax-b||^2+gamma(2|x|_1-||x||^2) s.t. -e¡Üx¡Üe
 %
-% Solve the above problem via BSALPSQP with
-% variable Hessian and without performing the Armijo line search
 %
-% [x,y,history] = nqL1rpvHwl(Q,A,B,b,lb,up,gamma,tol,beta,para)
+% [x1,y1,Tcpu,history] = ProximalADMMg(A,b,gamma,beta,w,opts)
 %
-% Solves the following problem via BSALPSQP:
+% Solves the following problem via ProximalADMMg:
 %
 %   min 2*gamma ||x||_1+0.5||Ay-b||^2-gamma ||y||^2 s.t. x-y=0£¬-e¡Üx¡Üe
 %
@@ -25,20 +23,23 @@ function [x1,y1,Tcpu,history] = nqL1rpvHwl(A,b,gamma,w,opts)
 % eta is the parameter controlling the positive definiteness of Hk
 % psi(x)=0 is the distance generating function
 %
-% More information can be found in the paper linked at:
-% http://www.stanford.edu/~boyd/papers/distr_opt_stat_learning_admm.html
+% More information can be found in the paper:
+% Jiang, B., Lin, T.Y., Ma, S.Q., Zhang, S.Z.: Structured nonconvex and
+% nonsmooth optimization: algorithms and iteration complexity analysis. 
+% Computational Optimization and Applications, 72, 115-157 (2019)
 %
 %
 % parameter
 [m,n] = size(A); % the size of matrix A.
 tol = opts.tol; 
-beta = opts.beta;
-s = opts.s; % the dual steplength
+% beta = opts.beta;
 MAX_ITER = opts.MAX_ITER;
 
 % eta = 10^-3; % accuracy controlling the positive definiteness of g
 
-t_start = tic;
+% t_start = tic;
+% start the clock
+t0 = cputime;
 
 %% Global constants and defaults
 
@@ -49,23 +50,20 @@ QUIET    = 0;
 % save a matrix-matrix multiplication
 AtA = A'*A;
 Atb = A'*b;
+% compute the Lipschitz constant Lg for g(y)
 lam = eig(AtA-2*gamma*eye(n));
 eig_g = min(lam); % Calculate the minimum eigenvalue of the Hessian of g
 L_g = max(abs(eig_g),max(lam)); % compute the Lipschitz constant Lg for g(y)
-if eig_g > L_g/2
-    Hk0 = AtA+(beta-2*gamma)*eye(n);
-elseif abs(eig_g) <= L_g/2
-    Hk0 = AtA+(beta-eig_g+L_g/2-2*gamma)*eye(n);
-else
-    Hk0 = AtA+(beta-2*gamma+2*abs(eig_g))*eye(n);
-end
+beta = (18*sqrt(3)+6)/13*L_g+0.0001;
+tau = 13*beta/(6*L_g^2+beta*L_g+13*beta^2);
+
 
 %% BSALPSQP solver
 %% Initialization
 x0 = zeros(n,1);
 y0 = zeros(n,1);
 lambda0 = zeros(n,1); % lambda0 = ones(m,1);
-Hk0_1 = Hk0\eye(n);
+% Hk0_1 = Hk0\eye(n);
 
 if ~QUIET
     fprintf('%3s\t%10s\t%10s\t%10s\t%10s\n', 'iter', ...
@@ -75,16 +73,15 @@ end
 for k = 1:MAX_ITER
 
     % x-update
-    pk = y0+lambda0/beta;
+    pk = y0-lambda0/beta;
     x1 = sign(pk).*max(min(abs(pk)-2*gamma/beta,1),0);
 
     % y-update 
-    nablayL = AtA*y0-Atb-2*gamma*y0+lambda0-beta*(x1-y0);
-    y1 = y0-Hk0_1*nablayL;
-
+    nablayL = AtA*y0-Atb-2*gamma*y0-lambda0+beta*(-x1+y0);
+    y1 = y0-tau*nablayL;
         
     % lambda-update
-    lambda1 = lambda0+s*(x1-y1);
+    lambda1 = lambda0-beta*(-x1+y1);
     
     if max(max(norm(x1-x0,inf),norm(y1-y0,inf)),norm(lambda1-lambda0,inf))< tol
 %     if (norm(x1-x0)+norm(y1-y0)+norm(lambda1-lambda0))/(norm(x0)+norm(y0)+norm(lambda0)+1)<tol
@@ -95,7 +92,9 @@ for k = 1:MAX_ITER
         history.objval(k)  = objective(A,b,x1,y1,gamma);
         history.pri_norm(k)  = norm(x1 - x0)+norm(y1 - y0);
         history.d_norm(k)  = norm(lambda1-lambda0);
-        history.mse(k) = sum((x1-w).^2)/n;
+%         history.mse(k) = sum((x1-w).^2)/n;
+        history.mse(k) = sum((y1-w).^2)/n;
+        times(k) = cputime-t0;
         if ~QUIET
             fprintf('%3d\t%10.4f\t%10.4f\t%10.2f\t%10.4f\n', k, ...
             history.pri_norm(k), history.d_norm(k), ...
@@ -104,22 +103,13 @@ for k = 1:MAX_ITER
         break
     end
     
-%    % matrices-update
-%     if eigQ>lamQ/2
-%         hk0 = Q;
-%     elseif abs(eigQ)<=lamQ/2
-%         hk0 = Q+(lamQ/2-eigQ)*eye(n2);
-%     else
-%         hk0 = Q+2*abs(eigQ)*eye(n2);
-%     end
-%     Hk0 = hk0+beta*BtB;
-    
     % diagnostics, reporting, termination checks
     history.objval(k)  = objective(A,b,x1,y1,gamma);
     history.pri_norm(k)  = norm(x1 - x0)+norm(y1 - y0);
 %     history.y_norm(k)  = norm(y1 - y0);
     history.d_norm(k)  = norm(lambda1-lambda0);
-    history.mse(k) = sum((x1-w).^2)/n;
+%     history.mse(k) = sum((x1-w).^2)/n;
+    history.mse(k) = sum((y1-w).^2)/n;
     
     if ~QUIET
         fprintf('%3d\t%10.4f\t%10.4f\t%10.2f\t%10.4f\n', k, ...
@@ -131,8 +121,9 @@ for k = 1:MAX_ITER
     x0 = x1;
     y0 = y1;
     lambda0 = lambda1;
+    times(k) = cputime-t0;
 end
-Tcpu = toc(t_start);
+% Tcpu = toc(t_start);
 end
 
 function p = objective(A,b,x,y,gamma)
